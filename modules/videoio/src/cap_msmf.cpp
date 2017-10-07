@@ -412,6 +412,7 @@ public:
     unsigned int getWidth();
     unsigned int getHeight();
     unsigned int getFrameRate() const;
+    MediaType getFormat();
     MediaType getFormat(unsigned int id);
     bool setupDevice(unsigned int w, unsigned int h, unsigned int idealFramerate = 0);
     bool setupDevice(unsigned int id);
@@ -434,6 +435,7 @@ private:
     unsigned int vd_Width;
     unsigned int vd_Height;
     unsigned int vd_FrameRate;
+    unsigned int vd_FormatId;
     unsigned int vd_CurrentNumber;
     bool vd_IsSetuped;
     std::map<UINT64, FrameRateMap> vd_CaptureFormats;
@@ -541,6 +543,8 @@ public:
     wchar_t *getNameVideoDevice(int deviceID);
     // Getting interface MediaSource for Media Foundation from videodevice with deviceID
     IMFMediaSource *getMediaSource(int deviceID);
+    // Getting format, which is supported by videodevice with deviceID
+    MediaType getFormat(int deviceID);
     // Getting format with id, which is supported by videodevice with deviceID
     MediaType getFormat(int deviceID, int unsigned id);
     // Checking of existence of the suitable video devices
@@ -566,7 +570,7 @@ public:
 #endif
     // Writing of Raw Data pixels from video device with deviceID with correction of RedAndBlue flipping flipRedAndBlue and vertical flipping flipImage
     bool getPixels(int deviceID, unsigned char * pixels, bool flipRedAndBlue = false, bool flipImage = false);
-    static void processPixels(unsigned char * src, unsigned char * dst, unsigned int width, unsigned int height, unsigned int bpp, bool bRGB, bool bFlip);
+    static void processPixels(unsigned char * src, unsigned char * dst, unsigned int width, unsigned int height, unsigned int numBytes, bool bRGB, bool bFlip);
 private:
     bool accessToDevices;
     videoInput(void);
@@ -1831,7 +1835,8 @@ unsigned char * RawImage::getpPixels()
 }
 
 videoDevice::videoDevice(void): vd_IsSetuped(false), vd_LockOut(OpenLock), vd_pFriendlyName(NULL),
-    vd_Width(0), vd_Height(0), vd_FrameRate(0), vd_pSource(NULL), vd_pImGrTh(NULL), vd_func(NULL), vd_userData(NULL)
+    vd_Width(0), vd_Height(0), vd_FrameRate(0), vd_FormatId(0), vd_CurrentNumber(0), vd_pSource(NULL),
+    vd_pImGrTh(NULL), vd_func(NULL), vd_userData(NULL)
 {
 #ifdef WINRT
     vd_pMedCap = nullptr;
@@ -2283,13 +2288,20 @@ unsigned int videoDevice::getHeight()
     else
         return 0;
 }
-
 unsigned int videoDevice::getFrameRate() const
 {
     if(vd_IsSetuped)
         return vd_FrameRate;
     else
         return 0;
+}
+
+MediaType videoDevice::getFormat()
+{
+    if (vd_IsSetuped)
+        return vd_CurrentFormats[vd_FormatId];
+    else
+        return MediaType();
 }
 
 IMFMediaSource *videoDevice::getMediaSource()
@@ -2367,20 +2379,17 @@ void videoDevice::buildLibraryofTypes()
     int count = 0;
     for(; i != vd_CurrentFormats.end(); i++)
     {
-        // Count only supported video formats.
-        if( (*i).MF_MT_SUBTYPE == MFVideoFormat_RGB24 )
-        {
-            size = (*i).MF_MT_FRAME_SIZE;
-            framerate = (*i).MF_MT_FRAME_RATE_NUMERATOR / (*i).MF_MT_FRAME_RATE_DENOMINATOR;
-            FrameRateMap FRM = vd_CaptureFormats[size];
-            SUBTYPEMap STM = FRM[framerate];
-            String subType((*i).pMF_MT_SUBTYPEName);
-            vectorNum VN = STM[subType];
-            VN.push_back(count);
-            STM[subType] = VN;
-            FRM[framerate] = STM;
-            vd_CaptureFormats[size] = FRM;
-        }
+        // TODO: Count only supported video formats.
+        size = (*i).MF_MT_FRAME_SIZE;
+        framerate = (*i).MF_MT_FRAME_RATE_NUMERATOR / (*i).MF_MT_FRAME_RATE_DENOMINATOR;
+        FrameRateMap FRM = vd_CaptureFormats[size];
+        SUBTYPEMap STM = FRM[framerate];
+        String subType((*i).pMF_MT_SUBTYPEName);
+        vectorNum VN = STM[subType];
+        VN.push_back(count);
+        STM[subType] = VN;
+        FRM[framerate] = STM;
+        vd_CaptureFormats[size] = FRM;
         count++;
     }
 }
@@ -2542,6 +2551,7 @@ bool videoDevice::setupDevice(unsigned int id)
             vd_Height = vd_CurrentFormats[id].height;
             vd_FrameRate = vd_CurrentFormats[id].MF_MT_FRAME_RATE_NUMERATOR /
                            vd_CurrentFormats[id].MF_MT_FRAME_RATE_DENOMINATOR;
+            vd_FormatId = id;
 #ifdef WINRT
 #ifdef HAVE_CONCURRENCY
             if (DEREF_AGILE_WRL_OBJ(vd_pMedCap)) {
@@ -3233,6 +3243,27 @@ unsigned int videoInput::getFrameRate(int deviceID) const
     return 0;
 }
 
+MediaType videoInput::getFormat(int deviceID)
+{
+    if (deviceID < 0)
+    {
+        DebugPrintOut(L"VIDEODEVICE %i: Invalid device ID\n", deviceID);
+        return MediaType();
+    }
+    if (accessToDevices)
+    {
+        videoDevices *VDS = &videoDevices::getInstance();
+        videoDevice * VD = VDS->getDevice(deviceID);
+        if (VD)
+            return VD->getFormat();
+    }
+    else
+    {
+        DebugPrintOut(L"VIDEODEVICE(s): There is not any suitable video device\n");
+    }
+    return MediaType();
+}
+
 wchar_t *videoInput::getNameVideoDevice(int deviceID)
 {
     if (deviceID < 0)
@@ -3338,19 +3369,11 @@ bool videoInput::getPixels(int deviceID, unsigned char * dstBuffer, bool flipRed
             RawImage *RIOut = VD->getRawImageOut();
             if(RIOut)
             {
-                const unsigned int bytes = 3;
+                const unsigned int width = VD->getWidth();
                 const unsigned int height = VD->getHeight();
-                const unsigned int width  = VD->getWidth();
-                const unsigned int size = bytes * width * height;
-                if(size == RIOut->getSize())
-                {
-                    processPixels(RIOut->getpPixels(), dstBuffer, width, height, bytes, flipRedAndBlue, flipImage);
-                    success = true;
-                }
-                else
-                {
-                    DebugPrintOut(L"ERROR: GetPixels() - bufferSizes do not match!\n");
-                }
+                const unsigned int size = RIOut->getSize();
+                processPixels(RIOut->getpPixels(), dstBuffer, width, height, size, flipRedAndBlue, flipImage);
+                success = true;
             }
             else
             {
@@ -3370,10 +3393,9 @@ bool videoInput::getPixels(int deviceID, unsigned char * dstBuffer, bool flipRed
 }
 
 void videoInput::processPixels(unsigned char * src, unsigned char * dst, unsigned int width,
-                                unsigned int height, unsigned int bpp, bool bRGB, bool bFlip)
+                                unsigned int height, unsigned int numBytes, bool bRGB, bool bFlip)
 {
-    unsigned int widthInBytes = width * bpp;
-    unsigned int numBytes = widthInBytes * height;
+    unsigned int widthInBytes = numBytes / height;
     int *dstInt, *srcInt;
     if(!bRGB)
     {
@@ -3554,15 +3576,17 @@ bool CvCaptureCAM_MSMF::grabFrame()
 
 IplImage* CvCaptureCAM_MSMF::retrieveFrame(int)
 {
-    const int w = (int)VI.getWidth(index);
-    const int h = (int)VI.getHeight(index);
+    MediaType MT = VI.getFormat(index);
+    const unsigned int w = VI.getWidth(index);
+    const unsigned int h = VI.getHeight(index);
+    const unsigned int c = MT.MF_MT_SAMPLE_SIZE / (w * h);
     if( !frame || w != frame->width || h != frame->height )
     {
         if (frame)
             cvReleaseImage( &frame );
-        frame = cvCreateImage( cvSize(w,h), 8, 3 );
+        frame = cvCreateImage( cvSize(w,h), 8, c );
     }
-    VI.getPixels( index, (uchar*)frame->imageData, false, true );
+    VI.getPixels( index, (uchar*)frame->imageData, false, MT.MF_MT_DEFAULT_STRIDE < 0 );
     return frame;
 }
 
